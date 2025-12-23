@@ -14,7 +14,7 @@ use uuid::Uuid;
 use zellij_utils::data::PaneContents;
 use zellij_utils::data::{
     Direction, KeyWithModifier, NewPanePlacement, PaneInfo, PermissionStatus, PermissionType,
-    PluginPermission, ResizeStrategy, WebSharing,
+    PluginPermission, Resize, ResizeStrategy, WebSharing,
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
@@ -242,6 +242,7 @@ pub(crate) struct Tab {
     auto_layout: bool,
     pending_vte_events: HashMap<u32, Vec<VteBytes>>,
     pub selecting_with_mouse_in_pane: Option<PaneId>, // this is only pub for the tests
+    pane_being_resized_with_mouse: Option<(PaneId, Direction, Position)>,
     link_handler: Rc<RefCell<LinkHandler>>,
     clipboard_provider: ClipboardProvider,
     // TODO: used only to focus the pane when the layout is loaded
@@ -484,6 +485,29 @@ pub trait Pane {
             return true;
         }
         false
+    }
+    fn get_border_at_position(&self, position: &Position) -> Option<Direction> {
+        if !self.contains(position) {
+            return None;
+        }
+        if (self.x()..self.get_content_x()).contains(&position.column()) {
+            return Some(Direction::Left);
+        }
+        if (self.get_content_x() + self.get_content_columns()..(self.x() + self.cols()))
+            .contains(&position.column())
+        {
+            return Some(Direction::Right);
+        }
+        if (self.y() as isize..self.get_content_y() as isize).contains(&position.line()) {
+            return Some(Direction::Up);
+        }
+        if ((self.get_content_y() + self.get_content_rows()) as isize
+            ..(self.y() + self.rows()) as isize)
+            .contains(&position.line())
+        {
+            return Some(Direction::Down);
+        }
+        None
     }
     // TODO: get rid of this in favor of intercept_mouse_event_on_frame
     fn intercept_left_mouse_click(&mut self, _position: &Position, _client_id: ClientId) -> bool {
@@ -770,6 +794,7 @@ impl Tab {
             pending_vte_events: HashMap::new(),
             connected_clients,
             selecting_with_mouse_in_pane: None,
+            pane_being_resized_with_mouse: None,
             link_handler: Rc::new(RefCell::new(LinkHandler::new())),
             clipboard_provider,
             focus_pane_id: None,
@@ -4327,6 +4352,11 @@ impl Tab {
                     self.set_force_render();
                     return Ok(MouseEffect::state_changed());
                 }
+            } else if let Some(border) = pane_at_position.get_border_at_position(&event.position) {
+                // start resizing tiled pane
+                self.pane_being_resized_with_mouse =
+                    Some((pane_at_position.pid(), border, event.position));
+                return Ok(MouseEffect::state_changed());
             }
         } else {
             let relative_position = pane_at_position.relative_position(&event.position);
@@ -4434,6 +4464,58 @@ impl Tab {
     ) -> Result<MouseEffect> {
         let err_context =
             || format!("failed to handle mouse event {event:?} for client {client_id}");
+        if let Some((pane_id, border, prev_position)) = self.pane_being_resized_with_mouse {
+            let delta = match border {
+                Direction::Left | Direction::Right => {
+                    event.position.column() as isize - prev_position.column() as isize
+                },
+                Direction::Up | Direction::Down => event.position.line() - prev_position.line(),
+            };
+            if delta != 0 {
+                let viewport = self.viewport.borrow();
+                if viewport.cols == 0 || viewport.rows == 0 {
+                    drop(viewport);
+                    return Ok(MouseEffect::state_changed());
+                }
+                let percent = match border {
+                    Direction::Left | Direction::Right => {
+                        (delta.unsigned_abs() as f64 / viewport.cols as f64) * 100.0
+                    },
+                    Direction::Up | Direction::Down => {
+                        (delta.unsigned_abs() as f64 / viewport.rows as f64) * 100.0
+                    },
+                };
+                drop(viewport);
+                // For right/down borders, positive delta = increase size
+                // For left/up borders, negative delta = increase size (border moves outward)
+                let resize = match border {
+                    Direction::Right | Direction::Down => {
+                        if delta > 0 {
+                            Resize::Increase
+                        } else {
+                            Resize::Decrease
+                        }
+                    },
+                    Direction::Left | Direction::Up => {
+                        if delta < 0 {
+                            Resize::Increase
+                        } else {
+                            Resize::Decrease
+                        }
+                    },
+                };
+                let strategy = ResizeStrategy::new(resize, Some(border));
+                let _ = self.tiled_panes.resize_pane_with_id(
+                    strategy,
+                    pane_id,
+                    Some((percent, percent)),
+                );
+                self.pane_being_resized_with_mouse = Some((pane_id, border, event.position));
+                self.swap_layouts.set_is_tiled_damaged();
+                self.set_force_render();
+            }
+            return Ok(MouseEffect::state_changed());
+        }
         let pane_is_being_moved_with_mouse = self.floating_panes.pane_is_being_moved_with_mouse();
         let active_pane_id = self
             .get_active_pane_id(client_id)
@@ -4471,6 +4553,10 @@ impl Tab {
     ) -> Result<MouseEffect> {
         let err_context =
             || format!("failed to handle mouse event {event:?} for client {client_id}");
+        if self.pane_being_resized_with_mouse.is_some() {
+            self.pane_being_resized_with_mouse = None;
+            return Ok(MouseEffect::state_changed());
+        }
         let mut leave_clipboard_message = false;
         let floating_panes_are_visible = self.floating_panes.panes_are_visible();
         let copy_on_release = self.copy_on_select;
