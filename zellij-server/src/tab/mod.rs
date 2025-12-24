@@ -4505,14 +4505,14 @@ impl Tab {
                     },
                 };
                 let strategy = ResizeStrategy::new(resize, Some(border));
-                let _ = self.tiled_panes.resize_pane_with_id(
+                let _ = self.tiled_panes.resize_pane_with_id_skip_pty(
                     strategy,
                     pane_id,
                     Some((percent, percent)),
                 );
                 self.pane_being_resized_with_mouse = Some((pane_id, border, event.position));
                 self.swap_layouts.set_is_tiled_damaged();
-                self.set_force_render();
+                self.set_should_clear_display_before_rendering();
             }
             return Ok(MouseEffect::state_changed());
         }
@@ -4554,6 +4554,7 @@ impl Tab {
         let err_context =
             || format!("failed to handle mouse event {event:?} for client {client_id}");
         if self.pane_being_resized_with_mouse.is_some() {
+            self.tiled_panes.resize_pty_all_panes();
             self.pane_being_resized_with_mouse = None;
             return Ok(MouseEffect::state_changed());
         }

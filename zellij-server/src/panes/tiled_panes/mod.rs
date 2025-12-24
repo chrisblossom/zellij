@@ -1747,6 +1747,42 @@ impl TiledPanes {
         Ok(pane_size_changed)
     }
 
+    /// Resize pane geometry only, without notifying PTYs.
+    /// Use this during mouse drag for visual feedback, then call resize_pty_all_panes on release.
+    pub fn resize_pane_with_id_skip_pty(
+        &mut self,
+        strategy: ResizeStrategy,
+        pane_id: PaneId,
+        resize_percent: Option<(f64, f64)>,
+    ) -> Result<bool> {
+        let err_context = || format!("failed to resize pane with id: {:?}", pane_id);
+        let mut pane_grid = TiledPaneGrid::new(
+            &mut self.panes,
+            &self.panes_to_hide,
+            *self.display_area.borrow(),
+            *self.viewport.borrow(),
+        );
+        let result = pane_grid
+            .change_pane_size(
+                &pane_id,
+                &strategy,
+                resize_percent.unwrap_or((RESIZE_PERCENT, RESIZE_PERCENT)),
+            )
+            .with_context(err_context);
+        self.reset_boundaries();
+        match result {
+            Ok(changed) => Ok(changed),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Send PTY resize to all panes. Call after geometry changes are complete.
+    pub fn resize_pty_all_panes(&mut self) {
+        for pane in self.panes.values_mut() {
+            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).unwrap();
+        }
+    }
+
     pub fn focus_next_pane(&mut self, client_id: ClientId) {
         let active_pane_id = self.get_active_pane_id(client_id).unwrap();
         let next_active_pane_id = {

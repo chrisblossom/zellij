@@ -27,6 +27,18 @@ Floating panes are unchanged - clicking their border still moves the pane.
 5. Modified `handle_left_mouse_motion` to apply resize during drag
 6. Modified `handle_left_mouse_release` to clear resize state
 
+## Bug Fix
+
+Fixed text corruption during resize by deferring PTY resize until mouse release.
+
+The issue was that every mouse motion event sent SIGWINCH to shells, causing dozens of redraws per second. Shells couldn't keep up and produced garbled output.
+
+**Solution:** During drag, only update visual pane geometry. On mouse release, send PTY resize once.
+
+Added to `tiled_panes/mod.rs`:
+- `resize_pane_with_id_skip_pty()` - geometry only, no PTY notification
+- `resize_pty_all_panes()` - sends PTY resize to all panes
+
 ## How to Test
 
 1. Build: `cargo xtask build`
